@@ -1,19 +1,11 @@
-import cv2
-import numpy as np
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
+from PIL import Image
 import os
+import random
 
-# ==============================
-# CONFIG
-# ==============================
-INPUT_IMAGE = "dataset/images-full/1.jpeg"
-OUTPUT_DIR = "dataset/class_wise_images"
-
-ROWS = 36
-COLS = 12   # IMPORTANT → adjust if needed
-
-# ==============================
-# LABEL DICT (your mapping)
-# ==============================
+# -------- LABEL DICTIONARY --------
 label_dict = {
     0: 'અ', 1: 'આ', 2: 'ઇ', 3: 'ઈ', 4: 'ઉ', 5: 'ઊ', 6: 'ઋ', 7: 'એ', 8: 'ઐ', 9: 'ઓ', 10: 'ઔ', 11: 'અં',
     12: 'ક', 13: 'કા', 14: 'કિ', 15: 'કી', 16: 'કુ', 17: 'કૂ', 18: 'કે', 19: 'કૈ', 20: 'કો', 21: 'કૌ', 22: 'કં', 23: 'કઃ',
@@ -51,163 +43,92 @@ label_dict = {
     396: 'ક્ષ', 397: 'ક્ષા', 398: 'ક્ષિ', 399: 'ક્ષી', 400: 'ક્ષુ', 401: 'ક્ષૂ', 402: 'ક્ષે', 403: 'ક્ષૈ', 404: 'ક્ષો', 405: 'ક્ષૌ', 406: 'ક્ષં', 407: 'ક્ષઃ',
     408: 'ત્ર', 409: 'ત્રા', 410: 'ત્રિ', 411: 'ત્રી', 412: 'ત્રુ', 413: 'ત્રૂ', 414: 'ત્રે', 415: 'ત્રૈ', 416: 'ત્રો', 417: 'ત્રૌ', 418: 'ત્રં', 419: 'ત્રઃ',
     420: 'જ્ઞ', 421: 'જ્ઞા', 422: 'જ્ઞિ', 423: 'જ્ઞી', 424: 'જ્ઞુ', 425: 'જ્ઞૂ', 426: 'જ્ઞે', 427: 'જ્ઞૈ', 428: 'જ્ઞો', 429: 'જ્ઞૌ', 430: 'જ્ઞં', 431: 'જ્ઞઃ'
-}  # keep your full dict here
+}
 
-# ==============================
-# CREATE FOLDERS
-# ==============================
-for i in range(len(label_dict)):
-    folder = os.path.join(OUTPUT_DIR, f"{i:03d}")
-    os.makedirs(folder, exist_ok=True)
+# -------- SETTINGS --------
+MODEL_PATH = "finetuned_model.pth"
+NUM_CLASSES = 432
 
-# ==============================
-# LOAD IMAGE
-# ==============================
-img = cv2.imread(INPUT_IMAGE)
-gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+# -------- DEVICE --------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
 
-# Adaptive threshold (better than fixed)
-thresh = cv2.adaptiveThreshold(
-    gray, 255,
-    cv2.ADAPTIVE_THRESH_MEAN_C,
-    cv2.THRESH_BINARY_INV,
-    15, 5
-)
+# -------- LOAD MODEL --------
+def load_model():
+    weights = models.EfficientNet_B0_Weights.DEFAULT
+    model = models.efficientnet_b0(weights=weights)
 
-# ==============================
-# LINE DETECTION
-# ==============================
-
-# Horizontal lines
-h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (100, 1))
-horizontal = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel)
-
-# Vertical lines
-v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 100))
-vertical = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, v_kernel)
-
-# Combine
-grid = cv2.add(horizontal, vertical)
-
-# ==============================
-# FIND INTERSECTIONS
-# ==============================
-intersections = cv2.bitwise_and(horizontal, vertical)
-
-ys, xs = np.where(intersections > 0)
-
-points = list(zip(xs, ys))
-
-# ==============================
-# CLUSTER POINTS INTO GRID
-# ==============================
-
-def cluster_points(points, axis=0, thresh=10):
-    points = sorted(points, key=lambda x: x[axis])
-    clusters = []
-    current = [points[0]]
-
-    for p in points[1:]:
-        if abs(p[axis] - current[-1][axis]) < thresh:
-            current.append(p)
-        else:
-            clusters.append(current)
-            current = [p]
-    clusters.append(current)
-
-    centers = [int(np.mean([p[axis] for p in cluster])) for cluster in clusters]
-    return centers
-
-x_coords = cluster_points(points, axis=0)
-y_coords = cluster_points(points, axis=1)
-
-# Sort properly
-x_coords = sorted(x_coords)
-y_coords = sorted(y_coords)
-
-print("Detected grid:", len(y_coords)-1, "rows,", len(x_coords)-1, "cols")
-
-# ==============================
-# EXTRACT CELLS
-# ==============================
-def remove_edge_lines(cell):
-    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
-
-    _, bin_img = cv2.threshold(
-        gray, 0, 255,
-        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    model.classifier = nn.Sequential(
+        nn.Dropout(0.5),
+        nn.Linear(model.classifier[1].in_features, NUM_CLASSES)
     )
 
-    h, w = bin_img.shape
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model = model.to(device)
+    model.eval()
 
-    trim = 3  # edge thickness to inspect
+    return model
 
-    # --- TOP ---
-    top_region = bin_img[0:trim, :]
-    if np.sum(top_region) > (0.3 * 255 * top_region.size):
-        cell = cell[trim:, :]
+# -------- TRANSFORM --------
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=[0.485, 0.456, 0.406],
+        std=[0.229, 0.224, 0.225]
+    )
+])
 
-    # --- BOTTOM ---
-    bottom_region = bin_img[h-trim:h, :]
-    if np.sum(bottom_region) > (0.3 * 255 * bottom_region.size):
-        cell = cell[:h-trim, :]
+# -------- GET RANDOM IMAGES --------
+def get_random_images(root_dir, num_images=30):
+    all_images = []
 
-    # --- LEFT ---
-    left_region = bin_img[:, 0:trim]
-    if np.sum(left_region) > (0.3 * 255 * left_region.size):
-        cell = cell[:, trim:]
+    for root, dirs, files in os.walk(root_dir):
+        for file in files:
+            if file.lower().endswith((".png", ".jpg", ".jpeg")):
+                all_images.append(os.path.join(root, file))
 
-    # --- RIGHT ---
-    right_region = bin_img[:, w-trim:w]
-    if np.sum(right_region) > (0.3 * 255 * right_region.size):
-        cell = cell[:, :w-trim]
+    return random.sample(all_images, num_images)
 
-    return cell
-index = 0
+# -------- PREDICT --------
+def predict(model, image_path):
+    image = Image.open(image_path).convert("RGB")
+    image = transform(image).unsqueeze(0).to(device)
 
-def enhance_contrast(cell):
-    gray = cv2.cvtColor(cell, cv2.COLOR_BGR2GRAY)
+    with torch.no_grad():
+        outputs = model(image)
+        _, pred = torch.max(outputs, 1)
 
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    enhanced = clahe.apply(gray)
+    label_index = pred.item()
+    guj_char = label_dict.get(label_index, "Unknown")
 
-    return enhanced
+    return label_index, guj_char
 
-# def sharpen(img):
-#     kernel = np.array([[0, -1, 0],
-#                        [-1, 5,-1],
-#                        [0, -1, 0]])
-#     return cv2.filter2D(img, -1, kernel)
+# -------- MAIN --------
+def main():
+    print("\nLoading model...")
+    model = load_model()
 
-for i in range(len(y_coords)-1):
-    for j in range(len(x_coords)-1):
+    print("Selecting random images...")
+    image_paths = get_random_images("dataset\preprocessed_images", 30)
 
-        if index >= len(label_dict):
-            break
+    print("\n🔍 Predictions:\n")
 
-        x1, x2 = x_coords[j], x_coords[j+1]
-        y1, y2 = y_coords[i], y_coords[i+1]
+    for img_path in image_paths:
+        pred_label, pred_char = predict(model, img_path)
 
-        margin = 2
+        # True label from folder name
+        true_label = int(os.path.basename(os.path.dirname(img_path)))
+        true_char = label_dict.get(true_label, "Unknown")
 
-        cell = img[
-            y1 + margin: y2 - margin,
-            x1 + margin: x2 - margin
-        ]
-        cell = remove_edge_lines(cell)
+        correct = (pred_label == true_label)
 
-        # Enhance contrast
-        #cell = enhance_contrast(cell)
+        print("Image:", os.path.basename(img_path))
+        print(f"   ✅ Predicted: {pred_label} → {pred_char}")
+        print(f"   🎯 Actual   : {true_label} → {true_char}")
+        print(f"   {'✅ Correct' if correct else '❌ Wrong'}")
+        print("-" * 50)
 
-        # Resize AFTER processing
-        cell = cv2.resize(cell, (224, 224))
 
-        # Save
-        folder = os.path.join(OUTPUT_DIR, f"{index:03d}")
-        filename = os.path.join(folder, f"img_{len(os.listdir(folder))}.png")
-
-        cv2.imwrite(filename, cell)
-
-        index += 1
-
-print("Done!")
+if __name__ == "__main__":
+    main()
